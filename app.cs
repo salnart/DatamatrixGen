@@ -651,7 +651,7 @@ namespace DataMatrixGenerator
             try
             {
                 var asm = Assembly.GetExecutingAssembly();
-                using (var s = asm.GetManifestResourceStream("DataMatrixGen.free-icon-qr-code-3952557.png"))
+                using (var s = asm.GetManifestResourceStream("DataMatrixGen.app.png"))
                 {
                     if (s != null)
                     {
