@@ -29,7 +29,7 @@
 
 ```bash
 csc -win32icon:"app.ico" ^
-    -resource:"free-icon-qr-code-3952557.png,DataMatrixGen.free-icon-qr-code-3952557.png" ^
+    -resource:"app.png,DataMatrixGen.app.png" ^
     -reference:"zxing.dll" ^
     -reference:System.Windows.Forms.dll ^
     -reference:System.Drawing.dll ^
