@@ -9,11 +9,57 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using System.Text;
+using System.Net.Http;
+using System.Threading.Tasks;
 using ZXing;
 using ZXing.Common;
 
 namespace DataMatrixGenerator
 {
+    // Custom Text Element Class
+    public class TextElement
+    {
+        public string Value { get; set; } // Default text or dynamic template like {product}
+        public double X { get; set; } // in mm
+        public double Y { get; set; } // in mm
+        public double W { get; set; } // in mm
+        public double H { get; set; } // in mm
+        public string Font { get; set; } // "1" - "5"
+        public int XMul { get; set; }
+        public int YMul { get; set; }
+        public bool IsExpanded { get; set; }
+
+        public TextElement()
+        {
+            Value = "{product}";
+            X = 2.5; // mm
+            Y = 2.5; // mm
+            W = 52.5; // mm
+            H = 10.0; // mm
+            Font = "3";
+            XMul = 1;
+            YMul = 1;
+            IsExpanded = true;
+        }
+    }
+
+    // Custom UI Wrapper for Text Elements in Sidebar
+    public class TextElementUI
+    {
+        public TextElement Element { get; set; }
+        public FlowLayoutPanel HeaderPanel { get; set; }
+        public FlowLayoutPanel BodyPanel { get; set; }
+        public Label HeaderLabel { get; set; }
+        public Label ToggleLabel { get; set; }
+        public TextBox ValueTextBox { get; set; }
+        public TextBox XTextBox { get; set; }
+        public TextBox YTextBox { get; set; }
+        public TextBox WTextBox { get; set; }
+        public TextBox HTextBox { get; set; }
+        public ComboBox FontComboBox { get; set; }
+    }
+
     // Custom Log Entry Class
     public class LogEntry
     {
@@ -24,13 +70,15 @@ namespace DataMatrixGenerator
         public DateTime Timestamp { get { return timestamp; } set { timestamp = value; } }
         public string Level { get { return level; } set { level = value; } }
         public string Message { get { return message; } set { message = value; } }
+        public int Height { get; set; }
 
-        public LogEntry() {}
+        public LogEntry() { Height = -1; }
         public LogEntry(DateTime ts, string lvl, string msg)
         {
             this.timestamp = ts;
             this.level = lvl;
             this.message = msg;
+            this.Height = -1;
         }
     }
 
@@ -335,9 +383,11 @@ namespace DataMatrixGenerator
         public Color NormalColor { get { return normalColor; } set { normalColor = value; Invalidate(); } }
         public Color HoverColor { get { return hoverColor; } set { hoverColor = value; Invalidate(); } }
         public Color BorderColor { get { return borderColor; } set { borderColor = value; Invalidate(); } }
+        public bool RoundButton { get; set; }
 
         public CustomButton()
         {
+            this.SetStyle(ControlStyles.SupportsTransparentBackColor, true);
             this.DoubleBuffered = true;
             this.normalColor = Color.FromArgb(0x2B, 0x2D, 0x31);
             this.hoverColor = Color.FromArgb(0x3E, 0x40, 0x46);
@@ -346,7 +396,8 @@ namespace DataMatrixGenerator
             this.borderColor = Color.FromArgb(0x3F, 0x41, 0x47);
             this.iconType = ButtonIconType.None;
             this.Cursor = Cursors.Hand;
-            this.BackColor = Color.FromArgb(0x18, 0x18, 0x1A);
+            this.BackColor = Color.Transparent;
+            this.RoundButton = false;
         }
 
         protected override void OnMouseEnter(EventArgs e) { isHovered = true; Invalidate(); base.OnMouseEnter(e); }
@@ -363,18 +414,33 @@ namespace DataMatrixGenerator
             Color currentBg = isPressed ? pressedColor : (isHovered ? hoverColor : normalColor);
             Rectangle rect = new Rectangle(0, 0, Width - 1, Height - 1);
 
-            // Fill
-            using (Brush bgBrush = new SolidBrush(currentBg))
+            // Fill and Border
+            if (RoundButton)
             {
-                UIHelpers.FillRoundedRectangle(g, bgBrush, rect, 6);
-            }
-
-            // Border
-            if (borderColor != Color.Transparent)
-            {
-                using (Pen borderPen = new Pen(borderColor, 1.2f))
+                using (Brush bgBrush = new SolidBrush(currentBg))
                 {
-                    UIHelpers.DrawRoundedRectangle(g, borderPen, rect, 6);
+                    g.FillEllipse(bgBrush, rect);
+                }
+                if (borderColor != Color.Transparent)
+                {
+                    using (Pen borderPen = new Pen(borderColor, 1.2f))
+                    {
+                        g.DrawEllipse(borderPen, rect);
+                    }
+                }
+            }
+            else
+            {
+                using (Brush bgBrush = new SolidBrush(currentBg))
+                {
+                    UIHelpers.FillRoundedRectangle(g, bgBrush, rect, 6);
+                }
+                if (borderColor != Color.Transparent)
+                {
+                    using (Pen borderPen = new Pen(borderColor, 1.2f))
+                    {
+                        UIHelpers.DrawRoundedRectangle(g, borderPen, rect, 6);
+                    }
                 }
             }
 
@@ -396,7 +462,20 @@ namespace DataMatrixGenerator
 
             using (Brush textBrush = new SolidBrush(textColor))
             {
-                g.DrawString(this.Text, this.Font, textBrush, startX, centerY - textSize.Height / 2f);
+                if (RoundButton || iconType == ButtonIconType.None)
+                {
+                    // Perfectly center single text character/string in button bounds using StringFormat
+                    using (StringFormat sf = new StringFormat())
+                    {
+                        sf.Alignment = StringAlignment.Center;
+                        sf.LineAlignment = StringAlignment.Center;
+                        g.DrawString(this.Text, this.Font, textBrush, new RectangleF(0, 0, Width, Height), sf);
+                    }
+                }
+                else
+                {
+                    g.DrawString(this.Text, this.Font, textBrush, startX, centerY - textSize.Height / 2f);
+                }
             }
         }
 
@@ -517,6 +596,17 @@ namespace DataMatrixGenerator
     public class LogConsole : ListBox
     {
         private List<LogEntry> logs;
+        
+        // Cached GDI+ brushes and font to prevent scroll lag
+        private Font logFont = new Font("Segoe UI Semibold", 10.5F);
+        private Brush tsBrush = new SolidBrush(Color.FromArgb(0x7E, 0x80, 0x87));
+        private Brush msgBrush = new SolidBrush(Color.FromArgb(0xD0, 0xD2, 0xD6));
+        private Brush infoBrush = new SolidBrush(Color.FromArgb(0x35, 0xA2, 0xEB));
+        private Brush warnBrush = new SolidBrush(Color.FromArgb(0xE2, 0xC0, 0x44));
+        private Brush errorBrush = new SolidBrush(Color.FromArgb(0xE0, 0x52, 0x52));
+        private Brush prevBrush = new SolidBrush(Color.FromArgb(0x4E, 0xC9, 0xB0));
+        private Brush selBrush = new SolidBrush(Color.FromArgb(0x1F, 0x45, 0x7A));
+        private Brush bgBrush = new SolidBrush(Color.FromArgb(0x0A, 0x0B, 0x0D));
 
         public List<LogEntry> Logs
         {
@@ -548,23 +638,52 @@ namespace DataMatrixGenerator
             this.MeasureItem += LogConsole_MeasureItem;
         }
 
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            if (Items.Count > 0)
+            {
+                foreach (var item in Items)
+                {
+                    LogEntry entry = item as LogEntry;
+                    if (entry != null) entry.Height = -1; // Invalidate cached heights
+                }
+                this.BeginInvoke((MethodInvoker)delegate {
+                    if (Items.Count > 0)
+                    {
+                        for (int i = 0; i < Items.Count; i++)
+                        {
+                            Items[i] = Items[i];
+                        }
+                    }
+                });
+            }
+        }
+
         private void LogConsole_MeasureItem(object sender, MeasureItemEventArgs e)
         {
             if (e.Index < 0 || e.Index >= Items.Count) { e.ItemHeight = 24; return; }
             LogEntry entry = Items[e.Index] as LogEntry;
             if (entry == null) { e.ItemHeight = 24; return; }
 
-            using (Font font = new Font("Segoe UI Semibold", 10.5F))
+            // Use pre-calculated/cached height to prevent lag
+            if (entry.Height > 0)
+            {
+                e.ItemHeight = entry.Height;
+                return;
+            }
+
             using (Graphics g = CreateGraphics())
             {
                 string ts = string.Format("[{0:yyyy-MM-dd HH:mm:ss.fff}] ", entry.Timestamp);
                 string lvl = string.Format("[{0}] ", entry.Level);
-                float tsW = g.MeasureString(ts, font).Width;
-                float lvlW = g.MeasureString(lvl, font).Width;
+                float tsW = g.MeasureString(ts, logFont).Width;
+                float lvlW = g.MeasureString(lvl, logFont).Width;
                 float maxW = Width - 16 - tsW - lvlW;
                 if (maxW < 50) maxW = 50;
-                SizeF sz = g.MeasureString(entry.Message, font, (int)maxW);
-                e.ItemHeight = Math.Max(24, (int)sz.Height + 4);
+                SizeF sz = g.MeasureString(entry.Message, logFont, (int)maxW);
+                entry.Height = Math.Max(24, (int)sz.Height + 4);
+                e.ItemHeight = entry.Height;
             }
         }
 
@@ -613,40 +732,31 @@ namespace DataMatrixGenerator
             // Selection background
             if ((e.State & DrawItemState.Selected) != 0)
             {
-                using (var b = new SolidBrush(Color.FromArgb(0x1F, 0x45, 0x7A)))
-                    g.FillRectangle(b, e.Bounds);
+                g.FillRectangle(selBrush, e.Bounds);
             }
             else
             {
-                using (var b = new SolidBrush(Color.FromArgb(0x0A, 0x0B, 0x0D)))
-                    g.FillRectangle(b, e.Bounds);
+                g.FillRectangle(bgBrush, e.Bounds);
             }
 
-            using (Font font = new Font("Segoe UI Semibold", 10.5F))
-            {
-                string ts = string.Format("[{0:yyyy-MM-dd HH:mm:ss.fff}] ", entry.Timestamp);
-                string lvl = string.Format("[{0}] ", entry.Level);
-                Color lvlColor = Color.FromArgb(0x35, 0xA2, 0xEB);
-                if (entry.Level == "WARN") lvlColor = Color.FromArgb(0xE2, 0xC0, 0x44);
-                else if (entry.Level == "ERROR") lvlColor = Color.FromArgb(0xE0, 0x52, 0x52);
-                else if (entry.Level == "LOAD" || entry.Level == "PREV") lvlColor = Color.FromArgb(0x4E, 0xC9, 0xB0);
+            string ts = string.Format("[{0:yyyy-MM-dd HH:mm:ss.fff}] ", entry.Timestamp);
+            string lvl = string.Format("[{0}] ", entry.Level);
+            Brush lvlBrush = infoBrush;
+            if (entry.Level == "WARN") lvlBrush = warnBrush;
+            else if (entry.Level == "ERROR") lvlBrush = errorBrush;
+            else if (entry.Level == "LOAD" || entry.Level == "PREV") lvlBrush = prevBrush;
 
-                float tsW = g.MeasureString(ts, font).Width;
-                float lvlW = g.MeasureString(lvl, font).Width;
-                int y = e.Bounds.Y + 2;
+            float tsW = g.MeasureString(ts, logFont).Width;
+            float lvlW = g.MeasureString(lvl, logFont).Width;
+            int y = e.Bounds.Y + 2;
 
-                using (Brush b = new SolidBrush(Color.FromArgb(0x7E, 0x80, 0x87)))
-                    g.DrawString(ts, font, b, 8, y);
-                using (Brush b = new SolidBrush(lvlColor))
-                    g.DrawString(lvl, font, b, 8 + tsW, y);
-                using (Brush b = new SolidBrush(Color.FromArgb(0xD0, 0xD2, 0xD6)))
-                {
-                    float maxW = Width - 16 - tsW - lvlW;
-                    if (maxW < 50) maxW = 50;
-                    RectangleF rc = new RectangleF(8 + tsW + lvlW, y, maxW, e.Bounds.Height - 2);
-                    g.DrawString(entry.Message, font, b, rc);
-                }
-            }
+            g.DrawString(ts, logFont, tsBrush, 8, y);
+            g.DrawString(lvl, logFont, lvlBrush, 8 + tsW, y);
+            
+            float maxW = Width - 16 - tsW - lvlW;
+            if (maxW < 50) maxW = 50;
+            RectangleF rc = new RectangleF(8 + tsW + lvlW, y, maxW, e.Bounds.Height - 2);
+            g.DrawString(entry.Message, logFont, msgBrush, rc);
 
             e.DrawFocusRectangle();
         }
@@ -664,8 +774,9 @@ namespace DataMatrixGenerator
         // Custom tabs
         private Panel tabContainer;
         private Label btnTabGenerate;
+        private Label btnTabDesigner;
         private Label btnTabLog;
-        private bool isGenerateTabActive;
+        private int activeTab = 0; // 0 = Generator, 1 = Designer, 2 = Log
 
         // Generator Panel Controls
         private Panel panelGenerate;
@@ -679,6 +790,58 @@ namespace DataMatrixGenerator
         private CustomButton btnPrint;
         private CustomButton btnSaveAs;
         private CustomButton btnSetPrinter;
+
+        // Designer Panel Controls
+        private Panel panelDesigner;
+        private FlowLayoutPanel panelDesignerSidebar;
+        private Panel panelDesignerCanvasContainer;
+        private PictureBox pbDesignerCanvas;
+        private ToggleSwitch toggleRotate180;
+        
+        // Sidebar controls
+        private TextBox txtLabelW;
+        private TextBox txtLabelH;
+        private TextBox txtLabelGap;
+        private TextBox txtLabelMargin;
+        private FlowLayoutPanel panelTextElementsContainer;
+        private List<TextElementUI> textElementsUI = new List<TextElementUI>();
+        private TextBox txtBarX;
+        private TextBox txtBarY;
+        private TextBox txtBarW;
+        private TextBox txtBarH;
+        private CustomButton btnAddText;
+        private CustomButton btnSaveTemplate;
+
+        // Designer State
+        private double designerLabelW = 58; // mm
+        private double designerLabelH = 40; // mm
+        private double designerGap = 2; // mm
+        private double designerMarginLeft = 1.3; // mm
+        private bool rotate180 = false;
+        private bool configAuto = false;
+        private bool configApi = false;
+        
+        // Barcode position in mm
+        private double dmatrixX = 16.5; // mm (132/8)
+        private double dmatrixY = 13.75; // mm (110/8)
+        private double dmatrixW = 25.0; // mm (200/8)
+        private double dmatrixH = 25.0; // mm (200/8)
+
+        // Multiple text elements support
+        private List<TextElement> textElements = new List<TextElement>();
+        private int selectedElementIndex = -1; // -1 = Label, -2 = Barcode, 0+ = Text Element
+
+        // Interaction state
+        private bool isDraggingText = false;
+        private bool isResizingText = false;
+        private bool isDraggingBarcode = false;
+        private bool isResizingBarcode = false;
+        private Point dragStartPoint;
+        private double originalX;
+        private double originalY;
+        private double originalW;
+        private double originalH;
+        private bool isUpdatingSidebar = false;
 
         // Log Panel Controls
         private Panel panelLog;
@@ -695,6 +858,9 @@ namespace DataMatrixGenerator
         private Rectangle formStart;
         private string productName = "";
         private Label lblProductInfo;
+        private static readonly HttpClient httpClient = new HttpClient();
+        private string lastEncodedData = "";
+        private Image lastBarcodeImage = null;
 
         public MainForm()
         {
@@ -728,8 +894,16 @@ namespace DataMatrixGenerator
             catch { }
 
             sessionLogs = new List<LogEntry>();
-            isGenerateTabActive = true;
+            activeTab = 0;
             selectedPrinter = "";
+
+            try
+            {
+                httpClient.DefaultRequestHeaders.Clear();
+                httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1");
+                httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+            }
+            catch { }
 
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             Directory.CreateDirectory(Path.Combine(baseDir, "data"));
@@ -743,13 +917,17 @@ namespace DataMatrixGenerator
                 {
                     if (!string.IsNullOrEmpty(line))
                     {
-                        sessionLogs.Add(new LogEntry(DateTime.Now, "PREV", line));
+                        var entry = ParseLogLine(line);
+                        entry.Level = "PREV";
+                        sessionLogs.Add(entry);
                     }
                 }
             }
 
+            LoadConfig();
             InitializeWindowControls();
             InitializeGeneratorTab();
+            InitializeDesignerTab();
             InitializeLogTab();
             PerformCustomLayout();
             HookChildMouseEvents(this);
@@ -757,6 +935,20 @@ namespace DataMatrixGenerator
             this.KeyDown += (s, e) => {
                 if (e.KeyCode == Keys.Enter && txtDataInput.Focused && toggleAuto.Checked)
                 { ExecuteGeneration(); e.Handled = true; e.SuppressKeyPress = true; }
+                else if (e.KeyCode == Keys.Delete && activeTab == 1)
+                {
+                    if (this.ActiveControl is TextBox) return;
+                    if (selectedElementIndex >= 0 && selectedElementIndex < textElements.Count)
+                    {
+                        textElements.RemoveAt(selectedElementIndex);
+                        selectedElementIndex = -1;
+                        UpdateSidebarProperties();
+                        pbDesignerCanvas.Invalidate();
+                        UpdatePreview();
+                        SaveConfig();
+                        e.Handled = true;
+                    }
+                }
             };
 
             Log("INFO", "Start:DatamatrixGen");
@@ -851,18 +1043,208 @@ namespace DataMatrixGenerator
             {
                 if (c == titleBar) continue;
                 c.MouseDown += (s, e) => {
-                    if (e.Button == MouseButtons.Left) OnMouseDown(new MouseEventArgs(e.Button, e.Clicks, e.X + c.Left, e.Y + c.Top, e.Delta));
+                    if (e.Button == MouseButtons.Left)
+                    {
+                        Point clientPoint = this.PointToClient(c.PointToScreen(e.Location));
+                        OnMouseDown(new MouseEventArgs(e.Button, e.Clicks, clientPoint.X, clientPoint.Y, e.Delta));
+                    }
                 };
-                c.MouseMove += (s, e) => OnMouseMove(new MouseEventArgs(e.Button, e.Clicks, e.X + c.Left, e.Y + c.Top, e.Delta));
+                c.MouseMove += (s, e) => {
+                    Point clientPoint = this.PointToClient(c.PointToScreen(e.Location));
+                    OnMouseMove(new MouseEventArgs(e.Button, e.Clicks, clientPoint.X, clientPoint.Y, e.Delta));
+                };
                 c.MouseUp += (s, e) => OnMouseUp(e);
                 if (c.HasChildren) HookChildMouseEvents(c);
+            }
+        }
+
+        private void SaveConfig()
+        {
+            try
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string configPath = Path.Combine(baseDir, "config.cfg");
+                
+                StringBuilder sb = new StringBuilder();
+                sb.AppendFormat(System.Globalization.CultureInfo.InvariantCulture,
+                    "Printer={0}\r\n" +
+                    "Auto={1}\r\n" +
+                    "API={2}\r\n" +
+                    "Rotate180={3}\r\n" +
+                    "LabelW={4:0.##}\r\n" +
+                    "LabelH={5:0.##}\r\n" +
+                    "LabelGap={6:0.##}\r\n" +
+                    "LabelMarginLeft={7:0.##}\r\n" +
+                    "BarX={8:0.##}\r\n" +
+                    "BarY={9:0.##}\r\n" +
+                    "BarW={10:0.##}\r\n" +
+                    "BarH={11:0.##}\r\n",
+                    selectedPrinter,
+                    toggleAuto != null ? toggleAuto.Checked : configAuto,
+                    toggleApi != null ? toggleApi.Checked : configApi,
+                    rotate180,
+                    designerLabelW,
+                    designerLabelH,
+                    designerGap,
+                    designerMarginLeft,
+                    dmatrixX,
+                    dmatrixY,
+                    dmatrixW,
+                    dmatrixH);
+
+                sb.AppendLine("TextCount=" + textElements.Count);
+                for (int i = 0; i < textElements.Count; i++)
+                {
+                    var te = textElements[i];
+                    sb.AppendFormat(System.Globalization.CultureInfo.InvariantCulture,
+                        "Text{0}_Val={1}\r\n" +
+                        "Text{0}_X={2:0.##}\r\n" +
+                        "Text{0}_Y={3:0.##}\r\n" +
+                        "Text{0}_W={4:0.##}\r\n" +
+                        "Text{0}_H={5:0.##}\r\n" +
+                        "Text{0}_Font={6}\r\n" +
+                        "Text{0}_XMul={7}\r\n" +
+                        "Text{0}_YMul={8}\r\n",
+                        i, te.Value, te.X, te.Y, te.W, te.H, te.Font, te.XMul, te.YMul);
+                }
+
+                File.WriteAllText(configPath, sb.ToString(), Encoding.UTF8);
+                Log("INFO", "Saved config.cfg successfully.");
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", "Failed to save config: " + ex.Message);
+            }
+        }
+
+        private void LoadConfig()
+        {
+            try
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string configPath = Path.Combine(baseDir, "config.cfg");
+                if (!File.Exists(configPath))
+                {
+                    // Fallback to load settings from config.txt if it exists to ease migration
+                    string oldConfig = Path.Combine(baseDir, "config.txt");
+                    if (File.Exists(oldConfig))
+                    {
+                        File.Move(oldConfig, configPath);
+                        Log("INFO", "Migrated config.txt to config.cfg");
+                    }
+                    else
+                    {
+                        // Add one default text element for fresh start
+                        textElements.Clear();
+                        textElements.Add(new TextElement { Value = "{product}" });
+                        SaveConfig();
+                        Log("INFO", "Created default config.cfg");
+                        return;
+                    }
+                }
+
+                textElements.Clear();
+                string[] lines = File.ReadAllLines(configPath, Encoding.UTF8);
+                foreach (string line in lines)
+                {
+                    int eqIdx = line.IndexOf('=');
+                    if (eqIdx > 0)
+                    {
+                        string key = line.Substring(0, eqIdx).Trim();
+                        string val = line.Substring(eqIdx + 1).Trim();
+
+                        if (key.Equals("Printer", StringComparison.OrdinalIgnoreCase))
+                        {
+                            selectedPrinter = val;
+                        }
+                        else if (key.Equals("Auto", StringComparison.OrdinalIgnoreCase))
+                        {
+                            configAuto = bool.Parse(val);
+                        }
+                        else if (key.Equals("API", StringComparison.OrdinalIgnoreCase))
+                        {
+                            configApi = bool.Parse(val);
+                        }
+                        else if (key.Equals("Rotate180", StringComparison.OrdinalIgnoreCase))
+                        {
+                            rotate180 = bool.Parse(val);
+                        }
+                        else if (key.Equals("LabelW", StringComparison.OrdinalIgnoreCase))
+                        {
+                            designerLabelW = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        else if (key.Equals("LabelH", StringComparison.OrdinalIgnoreCase))
+                        {
+                            designerLabelH = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        else if (key.Equals("LabelGap", StringComparison.OrdinalIgnoreCase))
+                        {
+                            designerGap = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        else if (key.Equals("LabelMarginLeft", StringComparison.OrdinalIgnoreCase))
+                        {
+                            designerMarginLeft = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        else if (key.Equals("BarX", StringComparison.OrdinalIgnoreCase))
+                        {
+                            dmatrixX = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        else if (key.Equals("BarY", StringComparison.OrdinalIgnoreCase))
+                        {
+                            dmatrixY = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        else if (key.Equals("BarW", StringComparison.OrdinalIgnoreCase))
+                        {
+                            dmatrixW = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        else if (key.Equals("BarH", StringComparison.OrdinalIgnoreCase))
+                        {
+                            dmatrixH = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        else
+                        {
+                            var textMatch = Regex.Match(key, @"Text(\d+)_([A-Za-z]+)", RegexOptions.IgnoreCase);
+                            if (textMatch.Success)
+                            {
+                                int index = int.Parse(textMatch.Groups[1].Value);
+                                string prop = textMatch.Groups[2].Value;
+
+                                while (textElements.Count <= index)
+                                {
+                                    textElements.Add(new TextElement());
+                                }
+
+                                var te = textElements[index];
+                                if (prop.Equals("Val", StringComparison.OrdinalIgnoreCase)) te.Value = val;
+                                else if (prop.Equals("X", StringComparison.OrdinalIgnoreCase)) te.X = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                                else if (prop.Equals("Y", StringComparison.OrdinalIgnoreCase)) te.Y = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                                else if (prop.Equals("W", StringComparison.OrdinalIgnoreCase)) te.W = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                                else if (prop.Equals("H", StringComparison.OrdinalIgnoreCase)) te.H = double.Parse(val, System.Globalization.CultureInfo.InvariantCulture);
+                                else if (prop.Equals("Font", StringComparison.OrdinalIgnoreCase)) te.Font = val;
+                                else if (prop.Equals("XMul", StringComparison.OrdinalIgnoreCase)) te.XMul = int.Parse(val);
+                                else if (prop.Equals("YMul", StringComparison.OrdinalIgnoreCase)) te.YMul = int.Parse(val);
+                            }
+                        }
+                    }
+                }
+
+                if (textElements.Count == 0)
+                {
+                    textElements.Add(new TextElement { Value = "{product}" });
+                }
+
+                Log("INFO", "Config loaded successfully. Printer: " + selectedPrinter + ", LabelW: " + designerLabelW + ", LabelH: " + designerLabelH + ", Text Elements: " + textElements.Count);
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", "Failed to load config: " + ex.Message);
             }
         }
 
         private void InitializeWindowControls()
         {
             // Custom Title Bar
-            titleBar = new Panel { BackColor = Color.FromArgb(0x1F, 0x1F, 0x22), Height = 45 };
+            titleBar = new Panel { BackColor = Color.FromArgb(0x28, 0x29, 0x2D), Height = 45 };
             titleBar.MouseDown += (s, e) => {
                 if (e.Button == MouseButtons.Left) {
                     ReleaseCapture();
@@ -900,7 +1282,7 @@ namespace DataMatrixGenerator
             };
 
             // Minimize/Close buttons
-            Color tbBg = Color.FromArgb(0x1F, 0x1F, 0x22);
+            Color tbBg = Color.FromArgb(0x28, 0x29, 0x2D);
             btnMin = new CustomButton { Text = "—", Width = 45, Height = 45, BorderColor = Color.Transparent, NormalColor = tbBg };
             btnMin.Click += (s, e) => this.WindowState = FormWindowState.Minimized;
 
@@ -943,7 +1325,17 @@ namespace DataMatrixGenerator
                 Size = new Size(110, 42),
                 Cursor = Cursors.Hand
             };
-            btnTabGenerate.Click += (s, e) => SwitchTab(true);
+            btnTabGenerate.Click += (s, e) => SwitchTab(0);
+
+            btnTabDesigner = new Label {
+                Text = "Designer",
+                ForeColor = tabInactiveText,
+                Font = tabFont,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Size = new Size(110, 42),
+                Cursor = Cursors.Hand
+            };
+            btnTabDesigner.Click += (s, e) => SwitchTab(1);
 
             btnTabLog = new Label {
                 Text = "Log",
@@ -953,14 +1345,17 @@ namespace DataMatrixGenerator
                 Size = new Size(80, 42),
                 Cursor = Cursors.Hand
             };
-            btnTabLog.Click += (s, e) => SwitchTab(false);
+            btnTabLog.Click += (s, e) => SwitchTab(2);
 
             tabContainer.Controls.Add(btnTabGenerate);
+            tabContainer.Controls.Add(btnTabDesigner);
             tabContainer.Controls.Add(btnTabLog);
 
             // Tab underline Paint
             tabContainer.Paint += (s, e) => {
-                Label active = isGenerateTabActive ? btnTabGenerate : btnTabLog;
+                Label active = btnTabGenerate;
+                if (activeTab == 1) active = btnTabDesigner;
+                else if (activeTab == 2) active = btnTabLog;
                 using (Pen p = new Pen(tabActiveText, 2.5f))
                 {
                     int lx = active.Left + 16;
@@ -993,6 +1388,8 @@ namespace DataMatrixGenerator
             };
 
             toggleAuto = new ToggleSwitch();
+            toggleAuto.Checked = configAuto;
+            toggleAuto.CheckedChanged += (s, e) => SaveConfig();
             lblAuto = new Label {
                 Text = "auto",
                 ForeColor = Color.FromArgb(0x9E, 0x9E, 0x9E),
@@ -1001,6 +1398,8 @@ namespace DataMatrixGenerator
             };
 
             toggleApi = new ToggleSwitch();
+            toggleApi.Checked = configApi;
+            toggleApi.CheckedChanged += (s, e) => SaveConfig();
             lblApi = new Label {
                 Text = "API",
                 ForeColor = Color.FromArgb(0x9E, 0x9E, 0x9E),
@@ -1052,6 +1451,974 @@ namespace DataMatrixGenerator
             this.Controls.Add(panelGenerate);
         }
 
+        private void InitializeDesignerTab()
+        {
+            panelDesigner = new Panel { BackColor = Color.Transparent, Visible = false };
+
+            // Sidebar panel (FlowLayoutPanel)
+            panelDesignerSidebar = new FlowLayoutPanel {
+                BackColor = Color.FromArgb(0x1F, 0x20, 0x23),
+                Padding = new Padding(15),
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoScroll = true
+            };
+
+            // Sidebar labels and textboxes
+            var fontLbl = new Font("Segoe UI", 9F);
+            var fontInput = new Font("Segoe UI", 9.5F);
+            var foreColor = Color.FromArgb(0xD0, 0xD2, 0xD6);
+            var inputBg = Color.FromArgb(0x2B, 0x2D, 0x31);
+            var inputFore = Color.White;
+
+            // Helper to create label
+            Func<string, Label> createLbl = (text) => new Label {
+                Text = text,
+                ForeColor = foreColor,
+                Font = fontLbl,
+                AutoSize = false,
+                Width = 100,
+                Height = 24,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0)
+            };
+
+            // Helper to create textbox
+            Func<string, TextBox> createTxt = (initialVal) => new TextBox {
+                Text = initialVal,
+                BackColor = inputBg,
+                ForeColor = inputFore,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = fontInput,
+                Width = 70,
+                Height = 20,
+                Margin = new Padding(0)
+            };
+
+            // Helper to create a horizontal row
+            Func<string, Control, Panel> createRow = (labelText, inputControl) => {
+                var p = new FlowLayoutPanel {
+                    FlowDirection = FlowDirection.LeftToRight,
+                    Width = 200,
+                    Height = 28,
+                    Margin = new Padding(0, 1, 0, 1)
+                };
+                p.Controls.Add(createLbl(labelText));
+                p.Controls.Add(inputControl);
+                return p;
+            };
+
+            // Group Label Size
+            var lblGroupSize = new Label {
+                Text = "LABEL SIZE (mm)",
+                ForeColor = Color.FromArgb(0x35, 0xA2, 0xEB),
+                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+                AutoSize = true
+            };
+            panelDesignerSidebar.Controls.Add(lblGroupSize);
+
+            txtLabelW = createTxt(designerLabelW.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            txtLabelW.TextChanged += (s, e) => {
+                if (isUpdatingSidebar) return;
+                double val;
+                if (double.TryParse(txtLabelW.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                { designerLabelW = val; PerformCustomLayout(); pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+            };
+            panelDesignerSidebar.Controls.Add(createRow("Width (mm):", txtLabelW));
+
+            txtLabelH = createTxt(designerLabelH.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            txtLabelH.TextChanged += (s, e) => {
+                if (isUpdatingSidebar) return;
+                double val;
+                if (double.TryParse(txtLabelH.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                { designerLabelH = val; PerformCustomLayout(); pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+            };
+            panelDesignerSidebar.Controls.Add(createRow("Height (mm):", txtLabelH));
+
+            txtLabelGap = createTxt(designerGap.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            txtLabelGap.TextChanged += (s, e) => {
+                if (isUpdatingSidebar) return;
+                double val;
+                if (double.TryParse(txtLabelGap.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                { designerGap = val; UpdatePreview(); }
+            };
+            panelDesignerSidebar.Controls.Add(createRow("Gap (mm):", txtLabelGap));
+
+            txtLabelMargin = createTxt(designerMarginLeft.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            txtLabelMargin.TextChanged += (s, e) => {
+                if (isUpdatingSidebar) return;
+                double val;
+                if (double.TryParse(txtLabelMargin.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                { designerMarginLeft = val; pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+            };
+            panelDesignerSidebar.Controls.Add(createRow("Margin L (mm):", txtLabelMargin));
+
+            toggleRotate180 = new ToggleSwitch();
+            toggleRotate180.Checked = rotate180;
+            toggleRotate180.CheckedChanged += (s, e) => {
+                if (isUpdatingSidebar) return;
+                rotate180 = toggleRotate180.Checked;
+                SaveConfig();
+                UpdatePreview();
+            };
+            panelDesignerSidebar.Controls.Add(createRow("Rotate 180:", toggleRotate180));
+
+            // Group Text Elements
+            var lblGroupText = new Label {
+                Text = "TEXT ELEMENTS",
+                ForeColor = Color.FromArgb(0x35, 0xA2, 0xEB),
+                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+                AutoSize = true,
+                Margin = new Padding(0, 15, 0, 5)
+            };
+            panelDesignerSidebar.Controls.Add(lblGroupText);
+
+            panelTextElementsContainer = new FlowLayoutPanel {
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Width = 200,
+                AutoSize = true,
+                Margin = new Padding(0)
+            };
+            panelDesignerSidebar.Controls.Add(panelTextElementsContainer);
+
+            btnAddText = new CustomButton {
+                Text = "Add Text Element",
+                NormalColor = Color.FromArgb(0x2E, 0x7D, 0x32),
+                HoverColor = Color.FromArgb(0x38, 0x8E, 0x3C),
+                BorderColor = Color.Transparent,
+                Font = new Font("Segoe UI Semibold", 9F),
+                Margin = new Padding(0, 5, 0, 5),
+                Width = 180,
+                Height = 28
+            };
+            btnAddText.Click += (s, e) => {
+                var te = new TextElement {
+                    Value = "Text " + (textElements.Count + 1),
+                    X = 2.0,
+                    Y = 2.0,
+                    W = 30.0,
+                    H = 5.0,
+                    Font = "2"
+                };
+                textElements.Add(te);
+                selectedElementIndex = textElements.Count - 1;
+                RebuildTextElementsUI();
+                UpdateSidebarProperties();
+                pbDesignerCanvas.Invalidate();
+                UpdatePreview();
+                SaveConfig();
+            };
+            panelDesignerSidebar.Controls.Add(btnAddText);
+
+            // Group Barcode
+            var lblGroupBar = new Label {
+                Text = "DATAMATRIX BARCODE",
+                ForeColor = Color.FromArgb(0x35, 0xA2, 0xEB),
+                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+                AutoSize = true,
+                Margin = new Padding(0, 15, 0, 5)
+            };
+            panelDesignerSidebar.Controls.Add(lblGroupBar);
+
+            txtBarX = createTxt(dmatrixX.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            txtBarX.TextChanged += (s, e) => {
+                if (isUpdatingSidebar) return;
+                double val;
+                if (double.TryParse(txtBarX.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                { dmatrixX = val; pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+            };
+            panelDesignerSidebar.Controls.Add(createRow("X (mm):", txtBarX));
+
+            txtBarY = createTxt(dmatrixY.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            txtBarY.TextChanged += (s, e) => {
+                if (isUpdatingSidebar) return;
+                double val;
+                if (double.TryParse(txtBarY.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                { dmatrixY = val; pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+            };
+            panelDesignerSidebar.Controls.Add(createRow("Y (mm):", txtBarY));
+
+            txtBarW = createTxt(dmatrixW.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            txtBarW.TextChanged += (s, e) => {
+                if (isUpdatingSidebar) return;
+                double val;
+                if (double.TryParse(txtBarW.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                { dmatrixW = val; pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+            };
+            panelDesignerSidebar.Controls.Add(createRow("Width (mm):", txtBarW));
+
+            txtBarH = createTxt(dmatrixH.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+            txtBarH.TextChanged += (s, e) => {
+                if (isUpdatingSidebar) return;
+                double val;
+                if (double.TryParse(txtBarH.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                { dmatrixH = val; pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+            };
+            panelDesignerSidebar.Controls.Add(createRow("Height (mm):", txtBarH));
+
+            // Save button
+            btnSaveTemplate = new CustomButton {
+                Text = "Save Template",
+                NormalColor = Color.FromArgb(0x35, 0xA2, 0xEB),
+                HoverColor = Color.FromArgb(0x4F, 0xB3, 0xE8),
+                BorderColor = Color.Transparent,
+                Font = new Font("Segoe UI Semibold", 9.5F),
+                Margin = new Padding(0, 12, 0, 0),
+                Width = 180,
+                Height = 35
+            };
+            btnSaveTemplate.Click += (s, e) => {
+                SaveConfig();
+                UpdatePreview();
+                MessageBox.Show("Шаблон успешно сохранен!", "Успех", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+            panelDesignerSidebar.Controls.Add(btnSaveTemplate);
+
+            // Bottom spacer to ensure Save Template button is fully scrollable and not cut off
+            panelDesignerSidebar.Controls.Add(new Panel {
+                Height = 35,
+                Width = 180,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            });
+
+            // Canvas Container Panel
+            panelDesignerCanvasContainer = new Panel {
+                BackColor = Color.FromArgb(0x0E, 0x0F, 0x11),
+                BorderStyle = BorderStyle.None
+            };
+
+            // PictureBox canvas
+            pbDesignerCanvas = new PictureBox {
+                BackColor = Color.FromArgb(0xEE, 0xF0, 0xF4),
+                BorderStyle = BorderStyle.FixedSingle,
+                Cursor = Cursors.Default
+            };
+            pbDesignerCanvas.Paint += PbDesignerCanvas_Paint;
+            pbDesignerCanvas.MouseDown += PbDesignerCanvas_MouseDown;
+            pbDesignerCanvas.MouseMove += PbDesignerCanvas_MouseMove;
+            pbDesignerCanvas.MouseUp += PbDesignerCanvas_MouseUp;
+
+            panelDesignerCanvasContainer.Controls.Add(pbDesignerCanvas);
+
+            panelDesigner.Controls.Add(panelDesignerSidebar);
+            panelDesigner.Controls.Add(panelDesignerCanvasContainer);
+
+            this.Controls.Add(panelDesigner);
+            RebuildTextElementsUI();
+            UpdateSidebarProperties();
+        }
+
+        private void PbDesignerCanvas_Paint(object sender, PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            // Calculate total backing paper dimensions in dots at 8 dots/mm (203 DPI)
+            int dotsW = (int)((designerLabelW + 2 * designerMarginLeft) * 8);
+            int dotsH = (int)((designerLabelH + 2.0) * 8);
+            if (dotsW <= 0 || dotsH <= 0) return;
+
+            // Leave space for rulers (offset canvas by 25 pixels at top and left)
+            int rulerSize = 25;
+            int canvasAvailableW = pbDesignerCanvas.Width - rulerSize - 10;
+            int canvasAvailableH = pbDesignerCanvas.Height - rulerSize - 10;
+            if (canvasAvailableW < 50) canvasAvailableW = 50;
+            if (canvasAvailableH < 50) canvasAvailableH = 50;
+
+            float scale = Math.Min((float)canvasAvailableW / dotsW, (float)canvasAvailableH / dotsH);
+            int renderW = (int)(dotsW * scale);
+            int renderH = (int)(dotsH * scale);
+            int startX = rulerSize + (canvasAvailableW - renderW) / 2;
+            int startY = rulerSize + (canvasAvailableH - renderH) / 2;
+
+            // Draw backing paper and white rounded label using RenderGdiPreview
+            Rectangle backingRect = new Rectangle(startX, startY, renderW, renderH);
+            
+            string sampleText = string.IsNullOrEmpty(productName) ? "НАЗВАНИЕ ТОВАРА (ТЕСТ)" : productName;
+            using (Image labelImg = RenderGdiPreview(lastBarcodeImage, sampleText))
+            {
+                g.DrawImage(labelImg, backingRect, new Rectangle(0, 0, labelImg.Width, labelImg.Height), GraphicsUnit.Pixel);
+            }
+
+            // Outline of the physical label inside the backing paper (for exact design borders)
+            int labelX = startX + (int)(designerMarginLeft * 8 * scale);
+            int labelY = startY + (int)(1.0 * 8 * scale);
+            int labelW = (int)(designerLabelW * 8 * scale);
+            int labelH = (int)(designerLabelH * 8 * scale);
+            Rectangle labelRect = new Rectangle(labelX, labelY, labelW, labelH);
+
+            // Draw visual grid (every 5 mm) inside the label bounds
+            using (Pen gridPen = new Pen(Color.FromArgb(40, Color.Gray), 1f))
+            {
+                gridPen.DashStyle = DashStyle.Dash;
+                
+                // Vertical grid lines
+                for (double mm = 5; mm < designerLabelW; mm += 5)
+                {
+                    float xPos = labelX + (float)(mm * 8 * scale);
+                    g.DrawLine(gridPen, xPos, labelY, xPos, labelY + labelH);
+                }
+                
+                // Horizontal grid lines
+                for (double mm = 5; mm < designerLabelH; mm += 5)
+                {
+                    float yPos = labelY + (float)(mm * 8 * scale);
+                    g.DrawLine(gridPen, labelX, yPos, labelX + labelW, yPos);
+                }
+            }
+
+            // Draw a distinct border around the physical rounded label bounds on the canvas
+            int labelRadius = (int)(2 * 8 * scale);
+            if (labelRadius > labelH / 2) labelRadius = labelH / 2;
+            if (labelRadius < 2) labelRadius = 2;
+            using (GraphicsPath roundedLabelPath = UIHelpers.CreateRoundedRectanglePath(labelRect, labelRadius))
+            using (Pen labelBorderPen = new Pen(Color.FromArgb(130, 140, 150), 1f))
+            {
+                g.DrawPath(labelBorderPen, roundedLabelPath);
+            }
+
+            // Draw border around the entire backing paper (Y-cut limits)
+            using (Pen backingBorderPen = new Pen(Color.FromArgb(160, 170, 180), 1f))
+            {
+                g.DrawRectangle(backingBorderPen, backingRect.X, backingRect.Y, backingRect.Width - 1, backingRect.Height - 1);
+            }
+
+            // Draw Millimeter Rulers (Top and Left scales)
+            using (Pen rulerPen = new Pen(Color.FromArgb(90, 100, 110), 1f))
+            using (Font rulerFont = new Font("Segoe UI", 7F))
+            using (Brush rulerBrush = new SolidBrush(Color.FromArgb(120, 130, 140)))
+            {
+                // Top Ruler (Horizontal)
+                g.DrawLine(rulerPen, labelX, startY - 1, labelX + labelW, startY - 1);
+                for (double mm = 0; mm <= designerLabelW; mm += 1.0)
+                {
+                    float xPos = labelX + (float)(mm * 8 * scale);
+                    if (mm % 10 == 0)
+                    {
+                        g.DrawLine(rulerPen, xPos, startY - 10, xPos, startY - 1);
+                        g.DrawString(mm.ToString(), rulerFont, rulerBrush, xPos - 5, startY - 22);
+                    }
+                    else if (mm % 5 == 0)
+                    {
+                        g.DrawLine(rulerPen, xPos, startY - 6, xPos, startY - 1);
+                    }
+                    else
+                    {
+                        g.DrawLine(rulerPen, xPos, startY - 3, xPos, startY - 1);
+                    }
+                }
+
+                // Left Ruler (Vertical)
+                g.DrawLine(rulerPen, labelX - 1, labelY, labelX - 1, labelY + labelH);
+                for (double mm = 0; mm <= designerLabelH; mm += 1.0)
+                {
+                    float yPos = labelY + (float)(mm * 8 * scale);
+                    if (mm % 10 == 0)
+                    {
+                        g.DrawLine(rulerPen, labelX - 10, yPos, labelX - 1, yPos);
+                        g.DrawString(mm.ToString(), rulerFont, rulerBrush, labelX - 22, yPos - 5);
+                    }
+                    else if (mm % 5 == 0)
+                    {
+                        g.DrawLine(rulerPen, labelX - 6, yPos, labelX - 1, yPos);
+                    }
+                    else
+                    {
+                        g.DrawLine(rulerPen, labelX - 3, yPos, labelX - 1, yPos);
+                    }
+                }
+            }
+
+            // Draw bounding boxes and resize handles on top of elements (relative to the white label)
+
+            // 1. Text Elements
+            for (int i = 0; i < textElements.Count; i++)
+            {
+                var te = textElements[i];
+                int tx = labelX + (int)(te.X * 8 * scale);
+                int ty = labelY + (int)(te.Y * 8 * scale);
+                int tw = (int)(te.W * 8 * scale);
+                int th = (int)(te.H * 8 * scale);
+                Rectangle textRect = new Rectangle(tx, ty, tw, th);
+
+                bool isSelected = (selectedElementIndex == i);
+                bool isInteracting = isSelected && (isDraggingText || isResizingText);
+
+                if (isInteracting)
+                {
+                    UIHelpers.DrawRoundedRectangle(g, Pens.Blue, textRect, 4);
+                    g.FillEllipse(Brushes.Blue, textRect.Right - 6, textRect.Bottom - 6, 6, 6);
+                    using (Pen p = new Pen(Color.White, 1f)) g.DrawEllipse(p, textRect.Right - 6, textRect.Bottom - 6, 6, 6);
+                }
+                else if (isSelected)
+                {
+                    using (Pen p = new Pen(Color.Blue, 1.5f))
+                    {
+                        UIHelpers.DrawRoundedRectangle(g, p, textRect, 4);
+                    }
+                    g.FillEllipse(Brushes.Blue, textRect.Right - 6, textRect.Bottom - 6, 6, 6);
+                    using (Pen p = new Pen(Color.White, 1f)) g.DrawEllipse(p, textRect.Right - 6, textRect.Bottom - 6, 6, 6);
+                }
+                else
+                {
+                    using (Pen p = new Pen(Color.FromArgb(80, Color.Blue), 1f))
+                    {
+                        p.DashStyle = DashStyle.Dash;
+                        UIHelpers.DrawRoundedRectangle(g, p, textRect, 4);
+                    }
+                }
+            }
+
+            // 2. Barcode Element
+            int bx = labelX + (int)(dmatrixX * 8 * scale);
+            int by = labelY + (int)(dmatrixY * 8 * scale);
+            int bw = (int)(dmatrixW * 8 * scale);
+            int bh = (int)(dmatrixH * 8 * scale);
+            Rectangle barRect = new Rectangle(bx, by, bw, bh);
+
+            bool isBarSelected = (selectedElementIndex == -2);
+            bool isBarInteracting = isBarSelected && (isDraggingBarcode || isResizingBarcode);
+
+            if (isBarInteracting)
+            {
+                UIHelpers.DrawRoundedRectangle(g, Pens.Blue, barRect, 4);
+                g.FillEllipse(Brushes.Blue, barRect.Right - 6, barRect.Bottom - 6, 6, 6);
+                using (Pen p = new Pen(Color.White, 1f)) g.DrawEllipse(p, barRect.Right - 6, barRect.Bottom - 6, 6, 6);
+            }
+            else if (isBarSelected)
+            {
+                using (Pen p = new Pen(Color.Blue, 1.5f))
+                {
+                    UIHelpers.DrawRoundedRectangle(g, p, barRect, 4);
+                }
+                g.FillEllipse(Brushes.Blue, barRect.Right - 6, barRect.Bottom - 6, 6, 6);
+                using (Pen p = new Pen(Color.White, 1f)) g.DrawEllipse(p, barRect.Right - 6, barRect.Bottom - 6, 6, 6);
+            }
+            else
+            {
+                using (Pen p = new Pen(Color.FromArgb(80, Color.Blue), 1f))
+                {
+                    p.DashStyle = DashStyle.Dash;
+                    UIHelpers.DrawRoundedRectangle(g, p, barRect, 4);
+                }
+            }
+        }
+
+        private void PbDesignerCanvas_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+
+            int dotsW = (int)((designerLabelW + 2 * designerMarginLeft) * 8);
+            int dotsH = (int)((designerLabelH + 2.0) * 8);
+            if (dotsW <= 0 || dotsH <= 0) return;
+
+            int rulerSize = 25;
+            int canvasAvailableW = pbDesignerCanvas.Width - rulerSize - 10;
+            int canvasAvailableH = pbDesignerCanvas.Height - rulerSize - 10;
+            float scale = Math.Min((float)canvasAvailableW / dotsW, (float)canvasAvailableH / dotsH);
+            int renderW = (int)(dotsW * scale);
+            int startX = rulerSize + (canvasAvailableW - renderW) / 2;
+            int startY = rulerSize + (canvasAvailableH - (int)(dotsH * scale)) / 2;
+
+            int labelX = startX + (int)(designerMarginLeft * 8 * scale);
+            int labelY = startY + (int)(1.0 * 8 * scale);
+
+            // Check Barcode Hit
+            int bx = labelX + (int)(dmatrixX * 8 * scale);
+            int by = labelY + (int)(dmatrixY * 8 * scale);
+            int bw = (int)(dmatrixW * 8 * scale);
+            int bh = (int)(dmatrixH * 8 * scale);
+            Rectangle barRect = new Rectangle(bx, by, bw, bh);
+            Rectangle barResizeHandle = new Rectangle(barRect.Right - 8, barRect.Bottom - 8, 8, 8);
+
+            if (selectedElementIndex == -2 && barResizeHandle.Contains(e.Location))
+            {
+                isResizingBarcode = true;
+                dragStartPoint = e.Location;
+                originalW = dmatrixW;
+                originalH = dmatrixH;
+                return;
+            }
+            if (barRect.Contains(e.Location))
+            {
+                selectedElementIndex = -2;
+                isDraggingBarcode = true;
+                dragStartPoint = e.Location;
+                originalX = dmatrixX;
+                originalY = dmatrixY;
+                UpdateSidebarProperties();
+                pbDesignerCanvas.Invalidate();
+                return;
+            }
+
+            // Check Text Elements Hit (Loop from top to bottom)
+            for (int i = textElements.Count - 1; i >= 0; i--)
+            {
+                var te = textElements[i];
+                int tx = labelX + (int)(te.X * 8 * scale);
+                int ty = labelY + (int)(te.Y * 8 * scale);
+                int tw = (int)(te.W * 8 * scale);
+                int th = (int)(te.H * 8 * scale);
+                Rectangle textRect = new Rectangle(tx, ty, tw, th);
+                Rectangle textResizeHandle = new Rectangle(textRect.Right - 8, textRect.Bottom - 8, 8, 8);
+
+                if (selectedElementIndex == i && textResizeHandle.Contains(e.Location))
+                {
+                    isResizingText = true;
+                    dragStartPoint = e.Location;
+                    originalW = te.W;
+                    originalH = te.H;
+                    return;
+                }
+
+                if (textRect.Contains(e.Location))
+                {
+                    selectedElementIndex = i;
+                    isDraggingText = true;
+                    dragStartPoint = e.Location;
+                    originalX = te.X;
+                    originalY = te.Y;
+                    
+                    // Auto-expand the selected text element panel in the sidebar
+                    if (selectedElementIndex >= 0 && selectedElementIndex < textElementsUI.Count)
+                    {
+                        var ui = textElementsUI[selectedElementIndex];
+                        ui.Element.IsExpanded = true;
+                        ui.ToggleLabel.Text = "▼";
+                        ui.BodyPanel.Visible = true;
+                    }
+
+                    UpdateSidebarProperties();
+                    pbDesignerCanvas.Invalidate();
+                    return;
+                }
+            }
+
+            // Clicked empty space on label
+            selectedElementIndex = -1; // Select general label properties
+            UpdateSidebarProperties();
+            pbDesignerCanvas.Invalidate();
+        }
+
+        private void PbDesignerCanvas_MouseMove(object sender, MouseEventArgs e)
+        {
+            int dotsW = (int)((designerLabelW + 2 * designerMarginLeft) * 8);
+            int dotsH = (int)((designerLabelH + 2.0) * 8);
+            if (dotsW <= 0 || dotsH <= 0) return;
+
+            int rulerSize = 25;
+            int canvasAvailableW = pbDesignerCanvas.Width - rulerSize - 10;
+            int canvasAvailableH = pbDesignerCanvas.Height - rulerSize - 10;
+            float scale = Math.Min((float)canvasAvailableW / dotsW, (float)canvasAvailableH / dotsH);
+            int renderW = (int)(dotsW * scale);
+            int startX = rulerSize + (canvasAvailableW - renderW) / 2;
+            int startY = rulerSize + (canvasAvailableH - (int)(dotsH * scale)) / 2;
+
+            int labelX = startX + (int)(designerMarginLeft * 8 * scale);
+            int labelY = startY + (int)(1.0 * 8 * scale);
+
+            // Set cursor style
+            bool overHandle = false;
+            bool overElement = false;
+
+            // Check Barcode
+            int bx = labelX + (int)(dmatrixX * 8 * scale);
+            int by = labelY + (int)(dmatrixY * 8 * scale);
+            int bw = (int)(dmatrixW * 8 * scale);
+            int bh = (int)(dmatrixH * 8 * scale);
+            Rectangle barRect = new Rectangle(bx, by, bw, bh);
+            Rectangle barResizeHandle = new Rectangle(barRect.Right - 8, barRect.Bottom - 8, 8, 8);
+
+            if (selectedElementIndex == -2 && barResizeHandle.Contains(e.Location)) overHandle = true;
+            if (barRect.Contains(e.Location)) overElement = true;
+
+            // Check Text Elements
+            for (int i = 0; i < textElements.Count; i++)
+            {
+                var te = textElements[i];
+                int tx = labelX + (int)(te.X * 8 * scale);
+                int ty = labelY + (int)(te.Y * 8 * scale);
+                int tw = (int)(te.W * 8 * scale);
+                int th = (int)(te.H * 8 * scale);
+                Rectangle textRect = new Rectangle(tx, ty, tw, th);
+                Rectangle textResizeHandle = new Rectangle(textRect.Right - 8, textRect.Bottom - 8, 8, 8);
+
+                if (selectedElementIndex == i && textResizeHandle.Contains(e.Location)) overHandle = true;
+                if (textRect.Contains(e.Location)) overElement = true;
+            }
+
+            if (overHandle || isResizingBarcode || isResizingText)
+            {
+                pbDesignerCanvas.Cursor = Cursors.SizeNWSE;
+            }
+            else if (overElement || isDraggingBarcode || isDraggingText)
+            {
+                pbDesignerCanvas.Cursor = Cursors.Hand;
+            }
+            else
+            {
+                pbDesignerCanvas.Cursor = Cursors.Default;
+            }
+
+            int dx = e.X - dragStartPoint.X;
+            int dy = e.Y - dragStartPoint.Y;
+
+            // Convert offsets from screen pixels to millimeters (1 pixel = 1 / (8 * scale) mm)
+            double dxMm = dx / (8 * scale);
+            double dyMm = dy / (8 * scale);
+
+            if (isDraggingText && selectedElementIndex >= 0 && selectedElementIndex < textElementsUI.Count)
+            {
+                var te = textElements[selectedElementIndex];
+                te.X = originalX + dxMm;
+                te.Y = originalY + dyMm;
+                isUpdatingSidebar = true;
+                var ui = textElementsUI[selectedElementIndex];
+                ui.XTextBox.Text = te.X.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                ui.YTextBox.Text = te.Y.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                isUpdatingSidebar = false;
+                pbDesignerCanvas.Invalidate();
+            }
+            else if (isResizingText && selectedElementIndex >= 0 && selectedElementIndex < textElementsUI.Count)
+            {
+                var te = textElements[selectedElementIndex];
+                te.W = originalW + dxMm;
+                te.H = originalH + dyMm;
+                if (te.W < 2.0) te.W = 2.0;
+                if (te.H < 1.0) te.H = 1.0;
+                isUpdatingSidebar = true;
+                var ui = textElementsUI[selectedElementIndex];
+                ui.WTextBox.Text = te.W.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                ui.HTextBox.Text = te.H.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                isUpdatingSidebar = false;
+                pbDesignerCanvas.Invalidate();
+            }
+            else if (isDraggingBarcode)
+            {
+                dmatrixX = originalX + dxMm;
+                dmatrixY = originalY + dyMm;
+                isUpdatingSidebar = true;
+                txtBarX.Text = dmatrixX.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                txtBarY.Text = dmatrixY.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                isUpdatingSidebar = false;
+                pbDesignerCanvas.Invalidate();
+            }
+            else if (isResizingBarcode)
+            {
+                dmatrixW = originalW + dxMm;
+                dmatrixH = originalH + dyMm;
+                if (dmatrixW < 3.0) dmatrixW = 3.0;
+                if (dmatrixH < 3.0) dmatrixH = 3.0;
+                isUpdatingSidebar = true;
+                txtBarW.Text = dmatrixW.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                txtBarH.Text = dmatrixH.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                isUpdatingSidebar = false;
+                pbDesignerCanvas.Invalidate();
+            }
+        }
+
+        private void PbDesignerCanvas_MouseUp(object sender, MouseEventArgs e)
+        {
+            isDraggingText = false;
+            isResizingText = false;
+            isDraggingBarcode = false;
+            isResizingBarcode = false;
+            pbDesignerCanvas.Invalidate();
+            SaveConfig();
+            UpdatePreview();
+        }
+
+        private void RebuildTextElementsUI()
+        {
+            if (panelTextElementsContainer == null) return;
+            
+            panelTextElementsContainer.Controls.Clear();
+            textElementsUI.Clear();
+
+            var fontLbl = new Font("Segoe UI", 8.5F);
+            var fontInput = new Font("Segoe UI", 9F);
+            var foreColor = Color.FromArgb(0xD0, 0xD2, 0xD6);
+            var inputBg = Color.FromArgb(0x2B, 0x2D, 0x31);
+            var inputFore = Color.White;
+
+            Func<string, Label> createLbl = (text) => new Label {
+                Text = text,
+                ForeColor = foreColor,
+                Font = fontLbl,
+                AutoSize = false,
+                Width = 80,
+                Height = 22,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0)
+            };
+
+            Func<string, TextBox> createTxt = (initialVal) => new TextBox {
+                Text = initialVal,
+                BackColor = inputBg,
+                ForeColor = inputFore,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = fontInput,
+                Width = 60,
+                Height = 18,
+                Margin = new Padding(0)
+            };
+
+            Func<string, Control, Panel> createRow = (labelText, inputControl) => {
+                var p = new FlowLayoutPanel {
+                    FlowDirection = FlowDirection.LeftToRight,
+                    Width = 180,
+                    Height = 24,
+                    Margin = new Padding(0, 1, 0, 1)
+                };
+                p.Controls.Add(createLbl(labelText));
+                p.Controls.Add(inputControl);
+                return p;
+            };
+
+            for (int i = 0; i < textElements.Count; i++)
+            {
+                int index = i;
+                var te = textElements[i];
+
+                var ui = new TextElementUI { Element = te };
+
+                // Group Panel for this element
+                var groupPanel = new FlowLayoutPanel {
+                    FlowDirection = FlowDirection.TopDown,
+                    WrapContents = false,
+                    Width = 190,
+                    AutoSize = true,
+                    BackColor = Color.Transparent, // Transparent background so our rounded custom painting is visible
+                    Margin = new Padding(0, 3, 0, 3),
+                    Padding = new Padding(5)
+                };
+                ui.HeaderPanel = groupPanel;
+
+                groupPanel.Paint += (s, ev) => {
+                    Graphics gBg = ev.Graphics;
+                    gBg.SmoothingMode = SmoothingMode.AntiAlias;
+                    Rectangle r = new Rectangle(0, 0, groupPanel.Width - 1, groupPanel.Height - 1);
+                    
+                    Color bg = (selectedElementIndex == index)
+                        ? Color.FromArgb(0x2B, 0x3A, 0x4F) // Blue highlight
+                        : Color.FromArgb(0x25, 0x26, 0x29); // Dark gray
+
+                    using (Brush brush = new SolidBrush(bg))
+                    {
+                        UIHelpers.FillRoundedRectangle(gBg, brush, r, 6);
+                    }
+                };
+
+                // Header Row (title, toggle button, delete button)
+                var headerRow = new FlowLayoutPanel {
+                    FlowDirection = FlowDirection.LeftToRight,
+                    Width = 180,
+                    Height = 24,
+                    Margin = new Padding(0)
+                };
+
+                var toggleLbl = new Label {
+                    Text = te.IsExpanded ? "▼" : "▶",
+                    ForeColor = Color.FromArgb(0x35, 0xA2, 0xEB),
+                    Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                    Width = 15,
+                    Height = 20,
+                    TextAlign = ContentAlignment.MiddleCenter,
+                    Cursor = Cursors.Hand,
+                    Margin = new Padding(0, 2, 0, 0)
+                };
+                ui.ToggleLabel = toggleLbl;
+
+                var titleLbl = new Label {
+                    Text = string.Format("Текст #{0}: {1}", index + 1, te.Value.Length > 10 ? te.Value.Substring(0, 8) + ".." : te.Value),
+                    ForeColor = Color.White,
+                    Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                    Width = 125,
+                    Height = 20,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Cursor = Cursors.Hand,
+                    Margin = new Padding(2, 2, 0, 0)
+                };
+                ui.HeaderLabel = titleLbl;
+
+                // Click header or toggle to expand/collapse
+                EventHandler toggleExpand = (s, e) => {
+                    te.IsExpanded = !te.IsExpanded;
+                    toggleLbl.Text = te.IsExpanded ? "▼" : "▶";
+                    ui.BodyPanel.Visible = te.IsExpanded;
+                    selectedElementIndex = index;
+                    UpdateSidebarProperties();
+                    pbDesignerCanvas.Invalidate();
+                };
+                toggleLbl.Click += toggleExpand;
+                titleLbl.Click += toggleExpand;
+
+                var deleteBtn = new CustomButton {
+                    Text = "✕",
+                    NormalColor = Color.Transparent,
+                    HoverColor = Color.FromArgb(0xC6, 0x28, 0x28),
+                    BorderColor = Color.Transparent,
+                    ForeColor = Color.FromArgb(0xE0, 0x52, 0x52),
+                    Font = new Font("Segoe UI", 7.5F, FontStyle.Bold),
+                    Width = 20,
+                    Height = 20,
+                    Margin = new Padding(5, 2, 0, 0)
+                };
+                deleteBtn.Click += (s, e) => {
+                    textElements.RemoveAt(index);
+                    if (selectedElementIndex == index) selectedElementIndex = -1;
+                    else if (selectedElementIndex > index) selectedElementIndex--;
+                    RebuildTextElementsUI();
+                    UpdateSidebarProperties();
+                    pbDesignerCanvas.Invalidate();
+                    UpdatePreview();
+                    SaveConfig();
+                };
+
+                headerRow.Controls.Add(toggleLbl);
+                headerRow.Controls.Add(titleLbl);
+                headerRow.Controls.Add(deleteBtn);
+                groupPanel.Controls.Add(headerRow);
+
+                // Body Panel (Value, X, Y, W, H, Font)
+                var bodyPanel = new FlowLayoutPanel {
+                    FlowDirection = FlowDirection.TopDown,
+                    WrapContents = false,
+                    Width = 180,
+                    AutoSize = true,
+                    Visible = te.IsExpanded,
+                    Margin = new Padding(0, 5, 0, 0)
+                };
+                ui.BodyPanel = bodyPanel;
+
+                ui.ValueTextBox = new TextBox {
+                    Text = te.Value,
+                    BackColor = inputBg,
+                    ForeColor = inputFore,
+                    BorderStyle = BorderStyle.FixedSingle,
+                    Font = fontInput,
+                    Width = 90,
+                    Height = 18,
+                    Margin = new Padding(0)
+                };
+                ui.ValueTextBox.TextChanged += (s, e) => {
+                    if (isUpdatingSidebar) return;
+                    te.Value = ui.ValueTextBox.Text;
+                    titleLbl.Text = string.Format("Текст #{0}: {1}", index + 1, te.Value.Length > 10 ? te.Value.Substring(0, 8) + ".." : te.Value);
+                    pbDesignerCanvas.Invalidate();
+                    UpdatePreview();
+                };
+                bodyPanel.Controls.Add(createRow("Значение:", ui.ValueTextBox));
+
+                ui.XTextBox = createTxt(te.X.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+                ui.XTextBox.TextChanged += (s, e) => {
+                    if (isUpdatingSidebar) return;
+                    double val;
+                    if (double.TryParse(ui.XTextBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                    { te.X = val; pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+                };
+                bodyPanel.Controls.Add(createRow("X (мм):", ui.XTextBox));
+
+                ui.YTextBox = createTxt(te.Y.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+                ui.YTextBox.TextChanged += (s, e) => {
+                    if (isUpdatingSidebar) return;
+                    double val;
+                    if (double.TryParse(ui.YTextBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                    { te.Y = val; pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+                };
+                bodyPanel.Controls.Add(createRow("Y (мм):", ui.YTextBox));
+
+                ui.WTextBox = createTxt(te.W.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+                ui.WTextBox.TextChanged += (s, e) => {
+                    if (isUpdatingSidebar) return;
+                    double val;
+                    if (double.TryParse(ui.WTextBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                    { te.W = val; pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+                };
+                bodyPanel.Controls.Add(createRow("Ширина (мм):", ui.WTextBox));
+
+                ui.HTextBox = createTxt(te.H.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+                ui.HTextBox.TextChanged += (s, e) => {
+                    if (isUpdatingSidebar) return;
+                    double val;
+                    if (double.TryParse(ui.HTextBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
+                    { te.H = val; pbDesignerCanvas.Invalidate(); UpdatePreview(); }
+                };
+                bodyPanel.Controls.Add(createRow("Высота (мм):", ui.HTextBox));
+
+                ui.FontComboBox = new ComboBox {
+                    BackColor = inputBg,
+                    ForeColor = inputFore,
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Font = fontInput,
+                    Width = 90,
+                    Margin = new Padding(0)
+                };
+                ui.FontComboBox.Items.AddRange(new object[] { "1", "2", "3", "4", "5" });
+                ui.FontComboBox.SelectedItem = te.Font;
+                ui.FontComboBox.SelectedIndexChanged += (s, e) => {
+                    if (isUpdatingSidebar) return;
+                    te.Font = ui.FontComboBox.SelectedItem.ToString();
+                    pbDesignerCanvas.Invalidate();
+                    UpdatePreview();
+                };
+                bodyPanel.Controls.Add(createRow("Шрифт:", ui.FontComboBox));
+
+                groupPanel.Controls.Add(bodyPanel);
+
+                panelTextElementsContainer.Controls.Add(groupPanel);
+                textElementsUI.Add(ui);
+            }
+        }
+
+        private void UpdateSidebarProperties()
+        {
+            if (isUpdatingSidebar) return;
+            isUpdatingSidebar = true;
+            try
+            {
+                txtLabelW.Text = designerLabelW.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                txtLabelH.Text = designerLabelH.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                txtLabelGap.Text = designerGap.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                txtLabelMargin.Text = designerMarginLeft.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                toggleRotate180.Checked = rotate180;
+
+                txtBarX.Text = dmatrixX.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                txtBarY.Text = dmatrixY.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                txtBarW.Text = dmatrixW.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                txtBarH.Text = dmatrixH.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+                // Update Text Elements Textboxes and Highlights
+                for (int i = 0; i < textElementsUI.Count; i++)
+                {
+                    var ui = textElementsUI[i];
+                    ui.ValueTextBox.Text = ui.Element.Value;
+                    ui.XTextBox.Text = ui.Element.X.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                    ui.YTextBox.Text = ui.Element.Y.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                    ui.WTextBox.Text = ui.Element.W.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                    ui.HTextBox.Text = ui.Element.H.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                    ui.FontComboBox.SelectedItem = ui.Element.Font;
+                    
+                    ui.HeaderPanel.Invalidate(); // Redraw with rounded borders
+                    if (selectedElementIndex == i)
+                    {
+                        ui.HeaderLabel.ForeColor = Color.FromArgb(0x35, 0xA2, 0xEB);
+                    }
+                    else
+                    {
+                        ui.HeaderLabel.ForeColor = Color.White;
+                    }
+                }
+            }
+            finally
+            {
+                isUpdatingSidebar = false;
+            }
+        }
+
         private void InitializeLogTab()
         {
             panelLog = new Panel { BackColor = Color.Transparent, Visible = false };
@@ -1069,18 +2436,25 @@ namespace DataMatrixGenerator
             this.Controls.Add(panelLog);
         }
 
-        private void SwitchTab(bool generateTab)
+        private void SwitchTab(int tabIndex)
         {
-            isGenerateTabActive = generateTab;
-            Color active = Color.FromArgb(0x35, 0xA2, 0xEB);
-            Color inactive = Color.FromArgb(0x7E, 0x80, 0x87);
-            btnTabGenerate.ForeColor = isGenerateTabActive ? active : inactive;
-            btnTabLog.ForeColor = !isGenerateTabActive ? active : inactive;
+            activeTab = tabIndex;
+            Color activeColor = Color.FromArgb(0x35, 0xA2, 0xEB);
+            Color inactiveColor = Color.FromArgb(0x7E, 0x80, 0x87);
+
+            btnTabGenerate.ForeColor = (activeTab == 0) ? activeColor : inactiveColor;
+            btnTabDesigner.ForeColor = (activeTab == 1) ? activeColor : inactiveColor;
+            btnTabLog.ForeColor = (activeTab == 2) ? activeColor : inactiveColor;
+
             btnTabGenerate.Invalidate();
+            btnTabDesigner.Invalidate();
             btnTabLog.Invalidate();
-            panelGenerate.Visible = isGenerateTabActive;
-            panelLog.Visible = !isGenerateTabActive;
-            if (!isGenerateTabActive) FilterLogs();
+
+            panelGenerate.Visible = (activeTab == 0);
+            panelDesigner.Visible = (activeTab == 1);
+            panelLog.Visible = (activeTab == 2);
+
+            if (activeTab == 2) FilterLogs();
             tabContainer.Invalidate();
         }
 
@@ -1101,7 +2475,8 @@ namespace DataMatrixGenerator
             tabContainer.Location = new Point(0, 45);
             tabContainer.Width = w;
             btnTabGenerate.Location = new Point(24, 0);
-            btnTabLog.Location = new Point(140, 0);
+            btnTabDesigner.Location = new Point(140, 0);
+            btnTabLog.Location = new Point(260, 0);
 
             // Content area
             int contentY = 45 + tabContainer.Height;
@@ -1155,6 +2530,50 @@ namespace DataMatrixGenerator
             btnSetPrinter.Location = new Point(startX + (btnW + gap) * 2, btnY);
             btnSetPrinter.Size = new Size(btnW, 36);
 
+            // Designer Panel
+            if (panelDesigner != null)
+            {
+                panelDesigner.Location = new Point(0, contentY);
+                panelDesigner.Size = new Size(w, contentH);
+
+                int sidebarW = 230;
+                int canvasContainerW = w - sidebarW;
+
+                if (panelDesignerSidebar != null)
+                {
+                    panelDesignerSidebar.Location = new Point(0, 0);
+                    panelDesignerSidebar.Size = new Size(sidebarW, contentH);
+                }
+
+                if (panelDesignerCanvasContainer != null)
+                {
+                    panelDesignerCanvasContainer.Location = new Point(sidebarW, 0);
+                    panelDesignerCanvasContainer.Size = new Size(canvasContainerW, contentH);
+                }
+
+                if (pbDesignerCanvas != null)
+                {
+                    double aspect = (designerLabelW + 2 * designerMarginLeft) / (designerLabelH + 2.0);
+                    if (aspect <= 0) aspect = 1;
+
+                    int maxCanvasW = canvasContainerW - 40;
+                    int maxCanvasH = contentH - 40;
+                    if (maxCanvasW < 50) maxCanvasW = 50;
+                    if (maxCanvasH < 50) maxCanvasH = 50;
+
+                    int canvasW = maxCanvasW;
+                    int canvasH = (int)(maxCanvasW / aspect);
+                    if (canvasH > maxCanvasH)
+                    {
+                        canvasH = maxCanvasH;
+                        canvasW = (int)(maxCanvasH * aspect);
+                    }
+
+                    pbDesignerCanvas.Size = new Size(canvasW, canvasH);
+                    pbDesignerCanvas.Location = new Point((canvasContainerW - canvasW) / 2, (contentH - canvasH) / 2);
+                }
+            }
+
             // Log Panel
             panelLog.Location = new Point(0, contentY);
             panelLog.Size = new Size(w, contentH);
@@ -1188,7 +2607,7 @@ namespace DataMatrixGenerator
                 MessageBox.Show("Ошибка записи лога: " + ex.Message);
             }
 
-            if (!isGenerateTabActive)
+            if (activeTab == 2)
             {
                 FilterLogs();
             }
@@ -1320,7 +2739,7 @@ namespace DataMatrixGenerator
             return input;
         }
 
-        private void FetchProductInfo(string data)
+        private async Task<string> FetchProductInfoAsync(string data)
         {
             try
             {
@@ -1330,60 +2749,60 @@ namespace DataMatrixGenerator
                 string jsonBody = "{\"code\":\"" + safeData + "\"}";
                 Log("INFO", "API request: " + jsonBody);
 
-                // Write JSON to temp file and call curl (most reliable)
-                string tmpFile = System.IO.Path.GetTempFileName();
-                System.IO.File.WriteAllText(tmpFile, jsonBody, System.Text.Encoding.UTF8);
-                var psi = new System.Diagnostics.ProcessStartInfo("curl.exe",
-                    "-s -X POST https://mobile.api.crpt.ru/mobile/check -H \"Content-Type: application/json\" -d @" + tmpFile);
-                psi.RedirectStandardOutput = true;
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-                psi.StandardOutputEncoding = System.Text.Encoding.UTF8;
-                var proc = System.Diagnostics.Process.Start(psi);
-                string response = proc.StandardOutput.ReadToEnd();
-                proc.WaitForExit(10000);
-                System.IO.File.Delete(tmpFile);
-
-                if (string.IsNullOrEmpty(response)) { Log("ERROR", "API: empty response"); return; }
-                Log("INFO", "API response: " + response);
-
-                // Extract productName from JSON (handles escaped quotes)
-                string search = "\"productName\":\"";
-                int idx = response.IndexOf(search);
-                if (idx >= 0)
+                using (var content = new StringContent(jsonBody, Encoding.UTF8, "application/json"))
                 {
-                    idx += search.Length;
-                    var sb = new System.Text.StringBuilder();
-                    while (idx < response.Length)
+                    var responseMessage = await httpClient.PostAsync("https://mobile.api.crpt.ru/mobile/check", content).ConfigureAwait(false);
+                    responseMessage.EnsureSuccessStatusCode();
+                    byte[] responseBytes = await responseMessage.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                    string response = Encoding.UTF8.GetString(responseBytes);
+
+                    if (string.IsNullOrEmpty(response)) { Log("ERROR", "API: empty response"); return ""; }
+                    Log("INFO", "API response: " + response);
+
+                    // Extract productName from JSON (handles escaped quotes)
+                    string search = "\"productName\":\"";
+                    int idx = response.IndexOf(search);
+                    if (idx >= 0)
                     {
-                        if (response[idx] == '\\' && idx + 1 < response.Length && response[idx + 1] == '"')
+                        idx += search.Length;
+                        var sb = new System.Text.StringBuilder();
+                        while (idx < response.Length)
                         {
-                            sb.Append('"');
-                            idx += 2;
+                            if (response[idx] == '\\' && idx + 1 < response.Length && response[idx + 1] == '"')
+                            {
+                                sb.Append('"');
+                                idx += 2;
+                            }
+                            else if (response[idx] == '"')
+                            {
+                                break;
+                            }
+                            else
+                            {
+                                sb.Append(response[idx]);
+                                idx++;
+                            }
                         }
-                        else if (response[idx] == '"')
-                        {
-                            break;
-                        }
-                        else
-                        {
-                            sb.Append(response[idx]);
-                            idx++;
-                        }
+                        string fetchedName = sb.ToString();
+                        this.BeginInvoke((MethodInvoker)delegate {
+                            productName = fetchedName;
+                            lblProductInfo.Text = productName;
+                            lblProductInfo.Visible = false;
+                            PerformCustomLayout();
+                            UpdatePreview();
+                        });
+                        return fetchedName;
                     }
-                    productName = sb.ToString();
-                    lblProductInfo.Text = productName;
-                    lblProductInfo.Visible = true;
-                    PerformCustomLayout();
                 }
             }
             catch (Exception ex)
             {
                 Log("ERROR", "API error: " + ex.Message);
             }
+            return "";
         }
 
-        private void ExecuteGeneration()
+        private async void ExecuteGeneration()
         {
             string inputText = txtDataInput.Text.Trim();
             if (string.IsNullOrEmpty(inputText))
@@ -1392,17 +2811,23 @@ namespace DataMatrixGenerator
                 return;
             }
 
+            btnGenerate.Enabled = false;
+            btnPrint.Enabled = false;
+
             try
             {
-                // Check if data already has GS1 control characters
-                bool hasGS1 = inputText.IndexOf('\u001D') >= 0;
+                productName = "";
+                lblProductInfo.Visible = false;
+
+                // Check if data already has GS1 control characters (either raw ASCII 29 or literal \u001D/\u001d)
+                bool hasGS1 = inputText.IndexOf('\u001D') >= 0 || inputText.IndexOf("\\u001D") >= 0 || inputText.IndexOf("\\u001d") >= 0;
                 string encodeData;
-                var opts = new EncodingOptions { Height = 300, Width = 300, Margin = 2 };
+                var opts = new EncodingOptions { Height = 300, Width = 300, Margin = 0 };
 
                 if (hasGS1)
                 {
-                    // Already raw GS1 with separators — use as-is, no extra FNC1
-                    encodeData = inputText;
+                    // Already raw GS1 with separators — use as-is (converting literal escape sequences to raw ASCII 29)
+                    encodeData = inputText.Replace("\\u001D", "\u001D").Replace("\\u001d", "\u001D");
                 }
                 else
                 {
@@ -1424,12 +2849,15 @@ namespace DataMatrixGenerator
                         throw new Exception("BarcodeWriter returned null. ZXing encoding failed.");
                     }
 
-                    // Display preview (clone to avoid locking file)
-                    if (pbPreview.Image != null)
+                    lastEncodedData = encodeData;
+
+                    if (lastBarcodeImage != null)
                     {
-                        pbPreview.Image.Dispose();
+                        lastBarcodeImage.Dispose();
                     }
-                    pbPreview.Image = (Image)bitmap.Clone();
+                    lastBarcodeImage = (Image)bitmap.Clone();
+
+                    UpdatePreview();
 
                     // Generate safe filename from last 10 characters
                     string cleanText = CleanFileName(inputText);
@@ -1440,19 +2868,48 @@ namespace DataMatrixGenerator
                     string relativePath = Path.Combine("data", last10 + ".png");
                     string fullPath = Path.Combine(baseDir, relativePath);
 
-                    bitmap.Save(fullPath, System.Drawing.Imaging.ImageFormat.Png);
+                    var bitmapClone = (Image)bitmap.Clone();
+                    await Task.Run(() => {
+                        try
+                        {
+                            bitmapClone.Save(fullPath, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log("ERROR", "Failed to save file: " + ex.Message);
+                        }
+                        finally
+                        {
+                            bitmapClone.Dispose();
+                        }
+                    }).ConfigureAwait(true);
 
-                    Log("INFO", string.Format("Code: \"{0}\" | File: data\\{1}", inputText, last10 + ".png"));
+                    Log("INFO", string.Format("Scanned: \"{0}\" | Converted: \"{1}\" | File: data\\{2}", inputText, encodeData, last10 + ".png"));
 
+                    string localProdName = "";
                     // Fetch product info from CRPT API (if enabled)
-                    if (toggleApi.Checked) FetchProductInfo(encodeData);
+                    if (toggleApi.Checked)
+                    {
+                        localProdName = await FetchProductInfoAsync(encodeData).ConfigureAwait(true);
+                    }
 
                     if (toggleAuto.Checked)
                     {
                         Log("INFO", "Auto-mode triggered printing.");
-                        PrintImageDirect(pbPreview.Image);
                         txtDataInput.Text = ""; // Clear textbox immediately
                         pbPreview.Focus();
+
+                        var printImg = RenderGdiPreview(lastBarcodeImage, localProdName, true);
+                        await Task.Run(() => {
+                            try
+                            {
+                                PrintImageDirect(printImg, localProdName);
+                            }
+                            finally
+                            {
+                                printImg.Dispose();
+                            }
+                        }).ConfigureAwait(true);
                     }
                 }
             }
@@ -1462,19 +2919,35 @@ namespace DataMatrixGenerator
                 Log("ERROR", errMsg);
                 MessageBox.Show(errMsg, "Ошибка генерации", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+            finally
+            {
+                btnGenerate.Enabled = true;
+                btnPrint.Enabled = true;
+            }
         }
 
         private void ExecuteDirectPrint()
         {
-            if (pbPreview.Image == null)
+            if (pbPreview.Image == null || lastBarcodeImage == null)
             {
                 MessageBox.Show("Сначала сгенерируйте код!", "Печать невозможна", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            PrintImageDirect(pbPreview.Image);
+            var printImg = RenderGdiPreview(lastBarcodeImage, productName, true);
+            string localProdName = productName;
+            Task.Run(() => {
+                try
+                {
+                    PrintImageDirect(printImg, localProdName);
+                }
+                finally
+                {
+                    printImg.Dispose();
+                }
+            });
         }
 
-        private void PrintImageDirect(Image img)
+        private void PrintImageDirect(Image img, string prodName)
         {
             try
             {
@@ -1484,37 +2957,43 @@ namespace DataMatrixGenerator
                     pd.PrinterSettings.PrinterName = selectedPrinter;
                 }
 
+                // Do NOT override PaperSize and Landscape to respect the printer's driver settings (like in BarTender)
+                pd.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
+
                 pd.PrintPage += (sender, args) => {
                     Graphics g = args.Graphics;
                     float pageW = args.PageBounds.Width;
                     float pageH = args.PageBounds.Height;
-                    float yOff = 0;
 
-                    // Print product name if available
-                    if (!string.IsNullOrEmpty(productName))
+                    // Automatically rotate the image 90 degrees if the design orientation (landscape/portrait)
+                    // does not match the printer driver's page orientation. This prevents stretching.
+                    Image printImg = img;
+                    bool rotate90 = (pageW > pageH) != (img.Width > img.Height);
+
+                    if (rotate90 || rotate180)
                     {
-                        using (Font pf = new Font("Segoe UI", 10, FontStyle.Bold))
+                        printImg = (Image)img.Clone();
+                        if (rotate90 && rotate180)
                         {
-                            string text = "Product: " + productName;
-                            SizeF sz = g.MeasureString(text, pf);
-                            float tx = (pageW - sz.Width) / 2f;
-                            g.DrawString(text, pf, Brushes.Black, tx, 20);
-                            yOff = sz.Height + 30;
+                            printImg.RotateFlip(RotateFlipType.Rotate270FlipNone);
+                        }
+                        else if (rotate90)
+                        {
+                            printImg.RotateFlip(RotateFlipType.Rotate90FlipNone);
+                        }
+                        else if (rotate180)
+                        {
+                            printImg.RotateFlip(RotateFlipType.Rotate180FlipNone);
                         }
                     }
 
-                    // Center and scale image keeping aspect ratio
-                    float imgW = img.Width;
-                    float imgH = img.Height;
-                    float availH = pageH - yOff - 10;
-                    float ratio = Math.Min(pageW / imgW, availH / imgH) * 0.8f;
-                    float drawW = imgW * ratio;
-                    float drawH = imgH * ratio;
-                    float x = (pageW - drawW) / 2f;
-                    float y = yOff + (availH - drawH) / 2f;
-
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.DrawImage(img, x, y, drawW, drawH);
+                    g.DrawImage(printImg, 0, 0, pageW, pageH);
+
+                    if (rotate90 || rotate180)
+                    {
+                        printImg.Dispose();
+                    }
                 };
 
                 pd.Print();
@@ -1522,10 +3001,133 @@ namespace DataMatrixGenerator
             }
             catch (Exception ex)
             {
-                string errMsg = string.Format("Ошибка при печати. Что произошло: {0}. Почему произошло: проверьте настройки принтера или доступность устройства. Детали:\r\n{1}", ex.Message, ex.ToString());
+                string errMsg = string.Format("Ошибка при печати. Что произошло: {0}. Детали:\r\n{1}", ex.Message, ex.ToString());
                 Log("ERROR", errMsg);
-                MessageBox.Show(errMsg, "Ошибка печати", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                this.BeginInvoke((MethodInvoker)delegate {
+                    MessageBox.Show(errMsg, "Ошибка печати", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                });
             }
+        }
+
+        private void UpdatePreview()
+        {
+            if (lastBarcodeImage == null)
+                return;
+
+            Image newPreview = RenderGdiPreview(lastBarcodeImage, productName);
+
+            if (pbPreview.Image != null)
+            {
+                pbPreview.Image.Dispose();
+            }
+            pbPreview.Image = newPreview;
+        }
+
+        private Image RenderGdiPreview(Image barcodeImage, string prodName, bool isForPrint = false)
+        {
+            // Calculate total backing paper dimensions at 8 dots/mm (203 DPI)
+            int totalW = (int)((designerLabelW + 2 * designerMarginLeft) * 8);
+            int totalH = (int)((designerLabelH + 2.0) * 8);
+            if (totalW <= 0) totalW = 485; // 58 + 2 * 1.3 mm
+            if (totalH <= 0) totalH = 336; // 40 + 2 mm
+
+            Bitmap bmp = new Bitmap(totalW, totalH);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                // Clear the backing paper (white for print, grey/blue for screen preview)
+                if (isForPrint)
+                {
+                    g.Clear(Color.White);
+                }
+                else
+                {
+                    g.Clear(Color.FromArgb(215, 220, 228));
+                }
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+                // Draw the white label shifted by Left Margin and Top Margin, with rounded corners (2mm radius)
+                int labelX = (int)(designerMarginLeft * 8);
+                int labelY = (int)(1.0 * 8); // 1 mm top margin
+                int labelW = (int)(designerLabelW * 8);
+                int labelH = (int)(designerLabelH * 8);
+                Rectangle labelRect = new Rectangle(labelX, labelY, labelW, labelH);
+
+                int radius = (int)(2 * 8); // 2 mm corner radius in dots
+                if (radius > labelH / 2) radius = labelH / 2;
+                if (radius < 2) radius = 2;
+
+                using (GraphicsPath path = UIHelpers.CreateRoundedRectanglePath(labelRect, radius))
+                {
+                    g.FillPath(Brushes.White, path);
+                    if (!isForPrint)
+                    {
+                        g.DrawPath(new Pen(Color.FromArgb(170, 175, 182), 1f), path); // Fine soft grey label border
+                    }
+                }
+
+                // Clip drawing to the white label area so nothing bleeds onto the backing paper
+                using (GraphicsPath clipPath = UIHelpers.CreateRoundedRectanglePath(labelRect, radius))
+                {
+                    g.SetClip(clipPath);
+
+                    // Draw all Text Elements
+                    foreach (var te in textElements)
+                    {
+                        string content = te.Value;
+                        if (content.Equals("{product}", StringComparison.OrdinalIgnoreCase))
+                        {
+                            content = prodName;
+                        }
+
+                        if (string.IsNullOrEmpty(content))
+                            continue;
+
+                        // Convert mm coordinates of the text element relative to the label
+                        float tx = labelX + (float)(te.X * 8);
+                        float ty = labelY + (float)(te.Y * 8);
+                        float tw = (float)(te.W * 8);
+                        float th = (float)(te.H * 8);
+                        RectangleF textRect = new RectangleF(tx, ty, tw, th);
+
+                        int pixelSize = 24; // default font 3
+                        if (te.Font == "1") pixelSize = 12;
+                        else if (te.Font == "2") pixelSize = 20;
+                        else if (te.Font == "3") pixelSize = 24;
+                        else if (te.Font == "4") pixelSize = 32;
+                        else if (te.Font == "5") pixelSize = 48;
+                        int fontSize = pixelSize * te.YMul;
+
+                        using (Font font = new Font("Segoe UI", fontSize, FontStyle.Bold, GraphicsUnit.Pixel))
+                        using (Brush brush = new SolidBrush(Color.Black))
+                        {
+                            using (StringFormat sf = new StringFormat())
+                            {
+                                sf.Alignment = StringAlignment.Near;
+                                sf.LineAlignment = StringAlignment.Near;
+                                sf.Trimming = StringTrimming.EllipsisCharacter;
+                                g.DrawString(content, font, brush, textRect, sf);
+                            }
+                        }
+                    }
+
+                    // Draw Barcode (DataMatrix) centered correctly according to X/Y/W/H in mm
+                    if (barcodeImage != null)
+                    {
+                        float bx = labelX + (float)(dmatrixX * 8);
+                        float by = labelY + (float)(dmatrixY * 8);
+                        float bw = (float)(dmatrixW * 8);
+                        float bh = (float)(dmatrixH * 8);
+                        RectangleF barRect = new RectangleF(bx, by, bw, bh);
+
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(barcodeImage, barRect, new RectangleF(0, 0, barcodeImage.Width, barcodeImage.Height), GraphicsUnit.Pixel);
+                    }
+
+                    g.ResetClip();
+                }
+            }
+            return bmp;
         }
 
         private void ExecuteSetPrinter()
@@ -1538,6 +3140,7 @@ namespace DataMatrixGenerator
                     {
                         selectedPrinter = dlg.PrinterSettings.PrinterName;
                         Log("INFO", "Printer for this session set to: " + selectedPrinter);
+                        SaveConfig();
                     }
                 }
             }
@@ -1586,9 +3189,25 @@ namespace DataMatrixGenerator
         [STAThread]
         static void Main()
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+            Application.ThreadException += (sender, e) => {
+                File.WriteAllText("crash.txt", "ThreadException:\r\n" + e.Exception.ToString());
+                MessageBox.Show("ThreadException:\n" + e.Exception.Message);
+            };
+            AppDomain.CurrentDomain.UnhandledException += (sender, e) => {
+                File.WriteAllText("crash.txt", "UnhandledException:\r\n" + e.ExceptionObject.ToString());
+                MessageBox.Show("UnhandledException:\n" + e.ExceptionObject.ToString());
+            };
+            try
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new MainForm());
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText("crash.txt", "Main Exception:\r\n" + ex.ToString());
+                MessageBox.Show("Exception:\n" + ex.Message);
+            }
         }
     }
 }
