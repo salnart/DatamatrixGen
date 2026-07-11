@@ -42,9 +42,9 @@ csc -win32icon:"app.ico" ^
 
 ## Скриншоты
 
-![Generator tab](Screenshots/1.png)
-![Designer tab](Screenshots/2.png)
-![Log tab](Screenshots/3.png)
+![Generator tab](Screenshots/1.png?v=2)
+![Designer tab](Screenshots/2.png?v=2)
+![Log tab](Screenshots/3.png?v=2)
 
 ## Структура кода GS1 DataMatrix
 
