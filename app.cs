@@ -2689,54 +2689,42 @@ namespace DataMatrixGenerator
 
         private string ConvertToGS1(string input)
         {
-            // Case 1: Input has brackets like (01)data(21)data(91)data(92)data
-            if (input.IndexOf('(') >= 0)
+            // Если в строке уже есть разделители, не трогаем, чтобы не испортить
+            if (input.IndexOf('\u001D') >= 0) return input;
+
+            StringBuilder result = new StringBuilder();
+            
+            // Берем первые 16 символов (01 + GTIN) - это всегда фиксированная длина
+            if (input.Length < 16) return input;
+            result.Append(input.Substring(0, 16));
+
+            string remaining = input.Substring(16);
+            
+            // Ищем хвосты 91, 92, 93 в остатке строки и ставим перед ними GS
+            int i = 0;
+            while (i < remaining.Length)
             {
-                var result = new System.Text.StringBuilder();
-                int i = 0;
-                while (i < input.Length)
+                bool found = false;
+                if (i + 2 <= remaining.Length)
                 {
-                    if (input[i] == '(' && i + 3 < input.Length && input[i + 3] == ')')
+                    string pair = remaining.Substring(i, 2);
+                    // Разделитель только перед крипто-хвостами 91, 92, 93
+                    if (pair == "91" || pair == "92" || pair == "93")
                     {
-                        string ai = input.Substring(i + 1, 2);
-                        if (ai == "91" || ai == "92" || ai == "93")
-                            result.Append('\u001D');
-                        result.Append(ai);
-                        i += 4;
-                    }
-                    else
-                    {
-                        result.Append(input[i]);
-                        i++;
+                        result.Append('\u001D');
+                        result.Append(pair);
+                        i += 2;
+                        found = true;
                     }
                 }
-                return result.ToString();
-            }
 
-            // Case 2: Raw AI data without brackets, no GS chars yet
-            if (input.IndexOf('\u001D') < 0)
-            {
-                // Insert \u001D before known tail AIs (91, 92, 93)
-                var result = new System.Text.StringBuilder();
-                int i = 0;
-                while (i < input.Length)
+                if (!found)
                 {
-                    if (i + 1 < input.Length)
-                    {
-                        string pair = input.Substring(i, 2);
-                        if ((pair == "91" || pair == "92" || pair == "93") && i > 0)
-                        {
-                            result.Append('\u001D');
-                        }
-                    }
-                    result.Append(input[i]);
+                    result.Append(remaining[i]);
                     i++;
                 }
-                return result.ToString();
             }
-
-            // Case 3: Already has \u001D — pass through
-            return input;
+            return result.ToString();
         }
 
         private async Task<string> FetchProductInfoAsync(string data)
